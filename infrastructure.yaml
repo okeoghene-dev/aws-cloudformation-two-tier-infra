@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Two-Tier Web Infrastructure - CloudFormation Template
+  Deploys VPC, public/private subnets, Internet Gateway,
+  security groups, EC2 web server, and S3 static assets bucket.
+  Author: Okeoghene Esosuakpo
+
+Parameters:
+  KeyPairName:
+    Description: Name of an existing EC2 Key Pair for SSH access
+    Type: AWS::EC2::KeyPair::KeyName
+
+  YourIPAddress:
+    Description: Your public IP address for SSH access (format x.x.x.x/32)
+    Type: String
+    Default: 0.0.0.0/0
+
+Resources:
+
+  # ── VPC ──────────────────────────────────────────────
+  TwoTierVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: two-tier-vpc
+
+  # ── INTERNET GATEWAY ─────────────────────────────────
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: two-tier-igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref TwoTierVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ── SUBNETS ──────────────────────────────────────────
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref TwoTierVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: public-subnet-1
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref TwoTierVPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: private-subnet-1
+
+  # ── ROUTE TABLES ─────────────────────────────────────
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref TwoTierVPC
+      Tags:
+        - Key: Name
+          Value: public-route-table
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  # ── SECURITY GROUPS ───────────────────────────────────
+  WebServerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Web server security group
+      VpcId: !Ref TwoTierVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref YourIPAddress
+      Tags:
+        - Key: Name
+          Value: sg-web
+
+  DatabaseSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Database security group
+      VpcId: !Ref TwoTierVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref WebServerSG
+      Tags:
+        - Key: Name
+          Value: sg-db
+
+  # ── EC2 WEB SERVER ────────────────────────────────────
+  WebServerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds:
+        - !Ref WebServerSG
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          echo "<h1>Infrastructure as Code - Deployed via CloudFormation</h1>
+          <p>Author: Okeoghene Esosuakpo</p>
+          <p>Stack: ${AWS::StackName}</p>
+          <p>Region: ${AWS::Region}</p>" > /var/www/html/index.html
+      Tags:
+        - Key: Name
+          Value: web-server-cfn
+        - Key: Project
+          Value: cloudformation-two-tier
+
+  # ── S3 STATIC ASSETS BUCKET ───────────────────────────
+  StaticAssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'static-assets-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: cloudformation-two-tier
+
+# ── OUTPUTS ───────────────────────────────────────────
+Outputs:
+  WebServerPublicIP:
+    Description: Public IP of the web server
+    Value: !GetAtt WebServerInstance.PublicIp
+
+  WebServerURL:
+    Description: URL to access the web server
+    Value: !Sub 'http://${WebServerInstance.PublicDnsName}'
+
+  S3BucketName:
+    Description: Name of the S3 static assets bucket
+    Value: !Ref StaticAssetsBucket
+
+  VPCId:
+    Description: VPC ID
+    Value: !Ref TwoTierVPC
